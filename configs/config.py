@@ -323,25 +323,25 @@ def validate_all_dataset_paths(
 
     print("\n===== Start validating all dataset paths =====")
     for domain in DatasetConfig.AVAILABLE_DOMAINS:
-        print(f"\n📌 Validating dataset domain: {domain}")
+        print(f"\nValidating dataset domain: {domain}")
 
         if check_label:
             for data_type in DatasetConfig.DATASET_TYPES:
                 label_path = DatasetConfig.CTR_SAMPLE_PATH_TEMPLATE.format(domain=domain, data_type=data_type)
                 if not os.path.exists(label_path):
                     result[domain]["missing"].append(f"Label file missing: {label_path}")
-                    print(f"❌ {label_path}")
+                    print(f"{label_path}")
                 else:
-                    print(f"✅ {label_path}")
+                    print(f"{label_path}")
 
         if check_kg_emb:
             for data_type in DatasetConfig.DATASET_TYPES:
                 kg_emb_path = EmbeddingConfig.KG_GAT_EMB_PATH_TEMPLATE.format(domain=domain, data_type=data_type)
                 if not os.path.exists(kg_emb_path):
                     result[domain]["missing"].append(f"KG‑GAT embedding file missing: {kg_emb_path}")
-                    print(f"❌ {kg_emb_path}")
+                    print(f"{kg_emb_path}")
                 else:
-                    print(f"✅ {kg_emb_path}")
+                    print(f"{kg_emb_path}")
 
         if check_text_emb:
             for data_type in DatasetConfig.DATASET_TYPES:
@@ -351,9 +351,9 @@ def validate_all_dataset_paths(
                     )
                     if not os.path.exists(text_emb_path):
                         result[domain]["missing"].append(f"Text embedding file missing: {text_emb_path}")
-                        print(f"❌ {text_emb_path}")
+                        print(f"{text_emb_path}")
                     else:
-                        print(f"✅ {text_emb_path}")
+                        print(f"{text_emb_path}")
 
     total_missing = sum(len(v["missing"]) for v in result.values())
     print(f"\n===== Path validation finished =====\nTotal missing files: {total_missing}")
@@ -363,7 +363,7 @@ def validate_all_dataset_paths(
             if res["missing"]:
                 print(f"  {domain}: {res['missing']}")
     else:
-        print("✅ All dataset paths exist!")
+        print("All dataset paths exist!")
 
     return result
 
@@ -374,6 +374,6 @@ def validate_output_paths() -> None:
             dir_path = dir_func(domain)
             try:
                 os.makedirs(dir_path, exist_ok=True)
-                print(f"✅ Output directory is accessible: {dir_path}")
+                print(f"Output directory is accessible: {dir_path}")
             except PermissionError:
-                raise PermissionError(f"❌ Permission denied when creating output directory: {dir_path}")
+                raise PermissionError(f"Permission denied when creating output directory: {dir_path}")
