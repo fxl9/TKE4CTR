@@ -6,6 +6,7 @@ Chronological split: last 10% as test, remaining 90% split 8:1 for train/valid, 
 reviewText, user_hist_id, user_hist_title are kept only in train set; removed from validation and test sets.
 """
 import os
+import traceback
 import pandas as pd
 
 def make_train_valid_dfs(data_path):
@@ -28,12 +29,14 @@ def split_dataset(df):
     total = len(df)
     if total == 0:
         raise ValueError("Dataset is empty, cannot perform split")
-    test_split = int(total * 0.9)
+    test_split = round(total * 0.9)
     remaining = test_split
-    valid_split = int(remaining * (8 / 9))
+    valid_split = round(remaining * (8 / 9))
+
     train = df.iloc[:valid_split].copy()
     valid = df.iloc[valid_split:test_split].copy()
     test = df.iloc[test_split:].copy()
+
     if len(train)==0 or len(valid)==0 or len(test)==0:
         raise ValueError("Split result contains empty subset, dataset size too small")
     return train, valid, test
@@ -78,6 +81,7 @@ def process_all_datasets():
             print(f"    Test set: {os.path.basename(test_file)} ({len(test)} records)")
         except Exception as e:
             print(f"Error processing {path}: {str(e)}")
+            traceback.print_exc()
             continue
 
 if __name__ == "__main__":

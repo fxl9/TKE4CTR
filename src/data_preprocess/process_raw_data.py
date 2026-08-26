@@ -27,6 +27,7 @@ SCENARIO_MAPPING = {
 EXCLUDE_ATTRIBUTES = {'vote', 'imageURL', 'imageURLHighRes', 'image', 'main_cat', 'fit', 'verified', 'tech1', 'tech2'}
 FINAL_COLS = [
     "Domain",
+    "scenario_id",
     "user_id",
     "user_name",
     "asin",
@@ -657,6 +658,8 @@ def process_single_scenario(
         if col not in join_data.columns:
             if col == "price":
                 join_data[col] = 0.0
+            elif col == "scenario_id":
+                join_data[col] = -1
             else:
                 join_data[col] = "unknown"
     join_data = join_data[FINAL_COLS].copy()
@@ -812,4 +815,3 @@ if __name__ == '__main__':
         sample_size=SAMPLE_SIZE,
         skip_existing=SKIP_EXISTING
     )
-
