@@ -19,6 +19,8 @@ from functools import partial
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+ENCODER_MODELS = {"bert-base-uncased", "deberta-v3-large"}
+
 
 class PromptDataset(Dataset):
     def __init__(self, samples):
@@ -81,6 +83,7 @@ class PromptEmbeddingGenerator:
 
         self.current_model = None
         self.current_tokenizer = None
+        self.current_model_name = None
 
     def init_distributed(self):
         if self.use_distributed and dist.is_available() and not dist.is_initialized() and self.num_processes > 1:
@@ -150,6 +153,7 @@ class PromptEmbeddingGenerator:
 
             self.current_model = model
             self.current_tokenizer = tokenizer
+            self.current_model_name = model_short_name
 
             if self.process_index == 0:
                 print(f"Loaded model: {abs_model_path}")
@@ -243,8 +247,13 @@ class PromptEmbeddingGenerator:
                             last_non_pad_pos.append(non_pad_idx[-1].item() if non_pad_idx.dim() > 0 else non_pad_idx.item())
                     return torch.tensor(last_non_pad_pos, device=self.device, dtype=torch.long)
 
-                last_non_pad = get_last_non_pad(final_mask)
-                vec = outputs.last_hidden_state[range(len(last_non_pad)), last_non_pad, :]
+                hidden = outputs.last_hidden_state
+                if self.current_model_name in ENCODER_MODELS:
+                    mask_f = final_mask.to(device=hidden.device, dtype=hidden.dtype).unsqueeze(-1)
+                    vec = (hidden * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1e-6)
+                else:
+                    last_non_pad = get_last_non_pad(final_mask)
+                    vec = hidden[range(len(last_non_pad)), last_non_pad, :]
 
                 if self.process_index == 0:
                     batch_embeds = vec.cpu().float().numpy()
@@ -291,6 +300,7 @@ class PromptEmbeddingGenerator:
 
             self.current_model = None
             self.current_tokenizer = None
+            self.current_model_name = None
             torch.cuda.empty_cache()
 
 

@@ -3,12 +3,15 @@ CTR predictor module for Text2KG CTR task.
 Support multiple predictor heads and embedding fusion with configurable multi‑head attention.
 Relative project path configuration.
 """
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import sys
 
-sys.path.append("./")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from configs.config import ModelConfig, SwitchConfig, EmbeddingConfig
 from src.models.fusion_layer import EmbeddingFusion
@@ -30,8 +33,7 @@ class FeatureGating(nn.Module):
         )
 
     def forward(self, x):
-        global_avg = x.mean(dim=0, keepdim=True)
-        weight = self.gate(global_avg)
+        weight = self.gate(x)
         return x * weight
 
 

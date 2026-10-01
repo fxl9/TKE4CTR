@@ -79,23 +79,19 @@ def init_gpu_device(gpu_id):
         print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
 
     if gpu_id < 0 or gpu_id >= num_gpus:
-        print(f"\nInvalid GPU id {gpu_id}, switch to GPU 1")
-        gpu_id = 1
-
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    torch.cuda.set_device(gpu_id)
-    device = torch.device(f"cuda:{gpu_id}")
+        print(f"\nInvalid GPU id {gpu_id}, switch to GPU 0")
+        gpu_id = 0
 
     try:
-        test_tensor = torch.tensor([1.0]).to(device)
+        torch.cuda.set_device(gpu_id)
+        device = torch.device(f"cuda:{gpu_id}")
+        torch.tensor([1.0]).to(device)
         print(f"\nSuccess init GPU {gpu_id}: {torch.cuda.get_device_name(gpu_id)}")
         print(f"   Device: cuda:{gpu_id} | Total memory: {torch.cuda.get_device_properties(gpu_id).total_memory / 1024 / 1024 / 1024:.1f}GB")
         return device
     except Exception as e:
-        print(f"\nGPU {gpu_id} init failed: {e}, switch to GPU 2")
-        os.environ["CUDA_VISIBLE_DEVICES"] = "2"
-        torch.cuda.set_device(2)
-        return torch.device("cuda:2")
+        print(f"\nGPU {gpu_id} init failed: {e}, switch to CPU")
+        return torch.device("cpu")
 
 
 def get_entity_type(ent):
@@ -292,8 +288,7 @@ class GraphAttentionLayer(nn.Module):
         h = h.view(N, self.heads, self.out_features)
 
         if edges.size(1) == 0:
-            out = h.mean(dim=1) + residual.view(N, self.heads, self.out_features).mean(dim=1)
-            return out
+            return residual
 
         edge_src = edges[0]
         edge_dst = edges[1]
@@ -461,7 +456,7 @@ class GATTrainer:
         return embeddings_np
 
 
-def main(gpu_id=1):
+def main(gpu_id=0):
     device = init_gpu_device(gpu_id)
     seed_everything()
 
@@ -534,6 +529,6 @@ def main(gpu_id=1):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--gpu', type=int, default=1, help='GPU ID')
+    parser.add_argument('--gpu', type=int, default=0, help='GPU ID')
     args = parser.parse_args()
     main(args.gpu)

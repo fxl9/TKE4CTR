@@ -4,12 +4,14 @@ Embedding fusion module for KG and text feature.
 Support concat, cross attention gated, cross modal interaction fusion methods.
 Dynamic text dimension and configurable multi‑head attention.
 """
+import os
 import torch
 import torch.nn as nn
 import sys
 
-ROOT_DIR = "./"
-sys.path.insert(0, ROOT_DIR)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from configs.config import ModelConfig, SwitchConfig, EmbeddingConfig
 
@@ -44,6 +46,20 @@ class PositionwiseFFN(nn.Module):
         return residual + self.dropout(x)
 
 
+class TokenExpander(nn.Module):
+    """Split one vector into several tokens so attention has more than one position."""
+
+    def __init__(self, hidden_dim: int, seq_len: int):
+        super().__init__()
+        self.seq_len = seq_len
+        self.hidden_dim = hidden_dim
+        self.proj = nn.Linear(hidden_dim, hidden_dim * seq_len)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.size(0)
+        return self.proj(x).view(batch_size, self.seq_len, self.hidden_dim)
+
+
 class ConcatFusion(nn.Module):
     def __init__(self, kg_dim: int, text_dim: int):
         super().__init__()
@@ -51,6 +67,7 @@ class ConcatFusion(nn.Module):
         hidden_dim = ModelConfig.FUSION_HYPERPARAMS["concat"]["hidden_dim"]
 
         self.kg_proj = nn.Sequential(
+            nn.Linear(kg_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.LayerNorm(hidden_dim // 2),
             nn.Dropout(dropout)
@@ -88,6 +105,7 @@ class CrossAttentionGatedFusion(nn.Module):
         dropout = ModelConfig.FUSION_HYPERPARAMS["cross_attention_gated"]["dropout"]
 
         assert self.hidden_dim % self.num_heads == 0, f"hidden_dim({self.hidden_dim}) must be divisible by num_heads({self.num_heads})"
+        self.seq_len = max(int(self.num_heads), 2)
 
         self.kg_proj = nn.Sequential(
             nn.Linear(kg_dim, self.hidden_dim),
@@ -101,6 +119,8 @@ class CrossAttentionGatedFusion(nn.Module):
             nn.LayerNorm(self.hidden_dim),
             nn.Dropout(dropout)
         )
+        self.kg_token_expand = TokenExpander(self.hidden_dim, self.seq_len)
+        self.text_token_expand = TokenExpander(self.hidden_dim, self.seq_len)
 
         self.cross_attn_kg2text = nn.MultiheadAttention(
             embed_dim=self.hidden_dim, num_heads=self.num_heads, dropout=dropout, batch_first=True
@@ -127,16 +147,16 @@ class CrossAttentionGatedFusion(nn.Module):
         self.out_dim = self.hidden_dim
 
     def forward(self, kg_emb: torch.Tensor, text_emb: torch.Tensor) -> torch.Tensor:
-        kg_proj = self.kg_proj(kg_emb).unsqueeze(1)
-        text_proj = self.text_proj(text_emb).unsqueeze(1)
+        kg_proj = self.kg_proj(kg_emb)
+        text_proj = self.text_proj(text_emb)
+        kg_tokens = self.kg_token_expand(kg_proj)
+        text_tokens = self.text_token_expand(text_proj)
 
-        kg_attn, _ = self.cross_attn_kg2text(kg_proj, text_proj, text_proj)
-        text_attn, _ = self.cross_attn_text2kg(text_proj, kg_proj, kg_proj)
+        kg_attn, _ = self.cross_attn_kg2text(kg_tokens, text_tokens, text_tokens)
+        text_attn, _ = self.cross_attn_text2kg(text_tokens, kg_tokens, kg_tokens)
 
-        kg_attn = kg_attn.squeeze(1)
-        text_attn = text_attn.squeeze(1)
-        kg_proj = kg_proj.squeeze(1)
-        text_proj = text_proj.squeeze(1)
+        kg_attn = kg_attn.mean(dim=1)
+        text_attn = text_attn.mean(dim=1)
 
         gate_input = torch.cat([kg_proj, kg_attn, text_proj, text_attn], dim=-1)
         gate_weight = self.gate(gate_input)
@@ -161,6 +181,7 @@ class CrossModalInteractionLayer(nn.Module):
         self.dropout = cfg["dropout"]
 
         assert self.hidden_dim % self.num_heads == 0, f"hidden_dim({self.hidden_dim}) must be divisible by num_heads({self.num_heads})"
+        self.seq_len = max(int(self.num_heads), 2)
 
         self.kg_proj = nn.Sequential(
             nn.Linear(kg_dim, self.hidden_dim),
@@ -172,6 +193,8 @@ class CrossModalInteractionLayer(nn.Module):
             nn.LayerNorm(self.hidden_dim),
             nn.Dropout(self.dropout)
         )
+        self.kg_token_expand = TokenExpander(self.hidden_dim, self.seq_len)
+        self.text_token_expand = TokenExpander(self.hidden_dim, self.seq_len)
 
         self.cross_attn_kg2text = nn.MultiheadAttention(
             embed_dim=self.hidden_dim, num_heads=self.num_heads, dropout=self.dropout, batch_first=True
@@ -187,14 +210,14 @@ class CrossModalInteractionLayer(nn.Module):
         self.out_dim = self.hidden_dim
 
     def forward(self, kg_emb: torch.Tensor, text_emb: torch.Tensor) -> torch.Tensor:
-        kg_hidden = self.kg_proj(kg_emb).unsqueeze(1)
-        text_hidden = self.text_proj(text_emb).unsqueeze(1)
+        kg_tokens = self.kg_token_expand(self.kg_proj(kg_emb))
+        text_tokens = self.text_token_expand(self.text_proj(text_emb))
 
-        kg_attended, _ = self.cross_attn_kg2text(kg_hidden, text_hidden, text_hidden)
-        text_attended, _ = self.cross_attn_text2kg(text_hidden, kg_hidden, kg_hidden)
+        kg_attended, _ = self.cross_attn_kg2text(kg_tokens, text_tokens, text_tokens)
+        text_attended, _ = self.cross_attn_text2kg(text_tokens, kg_tokens, kg_tokens)
 
-        kg_attended = kg_attended.squeeze(1)
-        text_attended = text_attended.squeeze(1)
+        kg_attended = kg_attended.mean(dim=1)
+        text_attended = text_attended.mean(dim=1)
         fused = torch.cat([kg_attended, text_attended], dim=-1)
         fused = self.dropout_layer(self.fusion(fused))
 

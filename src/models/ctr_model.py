@@ -3,13 +3,16 @@ Main CTR model wrapper for Text2KG CTR task.
 Integrate embedding reduction, predictor module, loss calculation, save and load utilities.
 Support fusion mode, kg‑only mode and text‑only mode with configurable multi‑head attention.
 """
+import os
 import torch
 import torch.nn as nn
 import torch.nn.init as init
 import sys
 import numpy as np
 
-sys.path.insert(0, "./")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from configs.config import ModelConfig, EmbeddingConfig, SwitchConfig, TrainConfig, GPUConfig
 from src.models.predictor import CTRPredictor

@@ -17,7 +17,9 @@ from sklearn.utils.class_weight import compute_class_weight
 import csv
 from datetime import datetime
 
-sys.path.insert(0, "./")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from configs.config import (
     ModelConfig, EmbeddingConfig, SwitchConfig, TrainConfig, GPUConfig,
@@ -43,9 +45,9 @@ class CTRTrainer:
         self.epochs = getattr(TrainConfig, 'epochs', 20)
         self.batch_size = getattr(TrainConfig, 'batch_size', 256)
         self.eval_batch_size = getattr(TrainConfig, 'eval_batch_size', 512)
-        self.learning_rate = getattr(TrainConfig, 'learning_rate', 5e-5)
-        self.weight_decay = getattr(TrainConfig, 'weight_decay', 1e-6)
-        self.patience = getattr(TrainConfig, 'patience', 5)
+        self.learning_rate = getattr(TrainConfig, 'lr', getattr(TrainConfig, 'learning_rate', 1e-5))
+        self.weight_decay = getattr(TrainConfig, 'weight_decay', 1e-4)
+        self.patience = getattr(TrainConfig, 'early_stopping_patience', getattr(TrainConfig, 'patience', 25))
         self.seed = getattr(TrainConfig, 'seed', 42)
         self.loss_fn_name = getattr(TrainConfig, 'loss_fn', 'bce_with_logits')
         self.eval_metrics = ["auc"]
@@ -130,11 +132,6 @@ class CTRTrainer:
         self.pos_ratio = np.sum(train_labels == 1) / len(train_labels)
         self._log(f"Train positive ratio: {self.pos_ratio:.4f}")
 
-        if self.pos_ratio > 0.9 or self.pos_ratio < 0.1:
-            self.classification_threshold = 0.2
-        else:
-            self.classification_threshold = 0.5
-
     def _set_seed(self):
         torch.manual_seed(self.seed)
         torch.cuda.manual_seed(self.seed) if torch.cuda.is_available() else None
@@ -195,21 +192,12 @@ class CTRTrainer:
         return model
 
     def _get_loss_fn(self):
-        if len(self.class_weights) == 1:
-            return nn.BCEWithLogitsLoss()
-
-        if self.loss_fn_name == "bce_with_logits":
-            pos_weight = self.class_weights[1] if len(self.class_weights) > 1 else torch.tensor(1.0).to(self.device)
-            if self.pos_ratio < 0.1:
-                pos_weight = pos_weight * 2.0
-            elif self.pos_ratio > 0.9:
-                pos_weight = pos_weight * 0.5
-            loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-            return loss_fn
-        elif self.loss_fn_name == "bce":
-            return nn.BCELoss(weight=self.class_weights)
-        else:
-            return nn.BCEWithLogitsLoss()
+        if self.loss_fn_name in ("bce_with_logits", "bce") and len(self.class_weights) > 1 and (
+                self.pos_ratio < 0.2 or self.pos_ratio > 0.8):
+            pos_weight = (self.class_weights[1] / self.class_weights[0]).reshape(1)
+            self._log(f"Use weighted BCE | pos_weight: {pos_weight.item():.2f}")
+            return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        return nn.BCEWithLogitsLoss()
 
     def _get_optimizer(self):
         optimizer_type = getattr(TrainConfig, 'optimizer', 'adamw')
@@ -324,9 +312,10 @@ class CTRTrainer:
         all_logits = []
         all_labels = []
 
-        grad_accum_steps = 2
+        grad_accum_steps = getattr(TrainConfig, 'grad_accum_steps', 2)
         self.optimizer.zero_grad()
         clear_cache_interval = 100
+        pending_accum = False
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{self.epochs} Train [GPU{self.gpu_id}]")
         for step, batch in enumerate(pbar):
@@ -349,21 +338,29 @@ class CTRTrainer:
                 logits = logits.reshape(labels.shape)
 
             loss = self.loss_fn(logits, labels)
+            raw_loss = loss.detach()
             loss = loss / grad_accum_steps
             loss.backward()
+            pending_accum = True
 
             if (step + 1) % grad_accum_steps == 0:
                 nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
+                pending_accum = False
 
-            total_loss += loss.item() * grad_accum_steps * labels.shape[0]
+            total_loss += raw_loss.item() * labels.shape[0]
             if len(all_logits) < 10000:
                 all_logits.append(logits.detach())
                 all_labels.append(labels.detach())
 
-            pbar.set_postfix({"loss": f"{loss.item() * grad_accum_steps:.4f}",
+            pbar.set_postfix({"loss": f"{raw_loss.item():.4f}",
                               "lr": f"{self.optimizer.param_groups[0]['lr']:.6f}"})
+
+        if pending_accum:
+            nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            self.optimizer.step()
+            self.optimizer.zero_grad()
 
         avg_loss = total_loss / len(self.train_loader.dataset)
         if len(all_logits) > 0:
@@ -452,7 +449,6 @@ class CTRTrainer:
             "learning_rate": self.learning_rate,
             "batch_size": self.batch_size,
             "pos_ratio": round(self.pos_ratio,4),
-            "classification_threshold": self.classification_threshold,
             "optimizer": getattr(TrainConfig, 'optimizer', 'adamw'),
             "lr_scheduler": getattr(TrainConfig, 'lr_scheduler', 'reduce_on_plateau'),
             "loss_function": self.loss_fn_name,
@@ -477,7 +473,7 @@ class CTRTrainer:
         self._log(f"===== Start training domain {self.domain} =====")
         self._log(f"config: LLM={self.text_emb_version} | fusion={self.fusion_method} | predictor={self.predictor_type}")
         self._log(f"GPU:{self.gpu_id} | device:{self.device} | train samples:{len(self.train_loader.dataset)}")
-        self._log(f"hyper: epochs={self.epochs} | batch={self.batch_size} | lr={self.learning_rate} | grad_acc=2")
+        self._log(f"hyper: epochs={self.epochs} | batch={self.batch_size} | lr={self.learning_rate} | grad_acc={getattr(TrainConfig, 'grad_accum_steps', 2)}")
 
         start_time = time.time()
         for epoch in range(self.epochs):
@@ -503,8 +499,7 @@ class CTRTrainer:
                             'text_emb_version': self.text_emb_version,
                             'fusion_method': self.fusion_method,
                             'predictor_type': self.predictor_type,
-                            'pos_ratio': self.pos_ratio,
-                            'threshold': self.classification_threshold
+                            'pos_ratio': self.pos_ratio
                         }
                     }, self.best_model_path)
                     self._log(f"Save best model (auc={current_metric:.4f}) -> {self.best_model_path}")

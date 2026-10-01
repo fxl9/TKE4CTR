@@ -9,10 +9,24 @@ import os
 import traceback
 import pandas as pd
 
+def parse_review_time(series):
+    text = (
+        series.astype(str)
+        .str.replace("\u2010", "-", regex=False)
+        .str.replace("\u2011", "-", regex=False)
+        .str.strip()
+    )
+    numeric = pd.to_numeric(text, errors="coerce")
+    parsed = pd.to_datetime(numeric, unit="s", errors="coerce")
+    missing = parsed.isna()
+    if missing.any():
+        parsed.loc[missing] = pd.to_datetime(text.loc[missing], errors="coerce")
+    return parsed
+
 def make_train_valid_dfs(data_path):
     df = pd.read_csv(data_path)
     if 'unixReviewTime' in df.columns:
-        df['_sort_time'] = pd.to_datetime(df['unixReviewTime'], unit='s', errors='coerce')
+        df['_sort_time'] = parse_review_time(df['unixReviewTime'])
         valid_mask = df['_sort_time'].notna()
         unknown_count = (~valid_mask).sum()
         if unknown_count > 0:

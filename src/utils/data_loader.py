@@ -12,7 +12,9 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from typing import Dict, List, Tuple, Optional, Union
 
-sys.path.insert(0, "./")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from configs.config import (
     DatasetConfig, EmbeddingConfig, SwitchConfig, TrainConfig,

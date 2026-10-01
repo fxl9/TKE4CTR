@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Data preprocessing for Amazon multi‑domain CTR dataset.
+Data preprocessing for Amazon multi-domain CTR dataset.
 Raw json.gz files should be manually downloaded from https://nijianmo.github.io/amazon/index.html.
 Used domains: All_Beauty, Amazon_Fashion, Digital_Music, Gift_Cards, Musical_Instruments.
 """
@@ -62,59 +62,61 @@ def clean_text_blank_lines(text):
     clean_str = clean_str.strip()
     return clean_str if clean_str else 'unknown'
 
+def _is_missing(node):
+    if node is None:
+        return True
+    if isinstance(node, (list, tuple, dict, set, np.ndarray)):
+        return False
+    try:
+        result = pd.isna(node)
+    except (ValueError, TypeError):
+        return False
+    if isinstance(result, (bool, np.bool_)):
+        return bool(result)
+    return False
+
+
+def _append_scalar(node, out):
+    if isinstance(node, bool):
+        out.append(str(node))
+        return
+    if isinstance(node, str):
+        clean_str = clean_text_blank_lines(node)
+        if clean_str and clean_str != 'unknown':
+            out.append(clean_str)
+        return
+    if _is_missing(node):
+        return
+    clean_str = clean_text_blank_lines(str(node))
+    if clean_str and clean_str != 'unknown':
+        out.append(clean_str)
+
+
+def _flatten_value(node, out, depth=0):
+    if depth > 50 or node is None:
+        return
+    if isinstance(node, np.ndarray):
+        node = node.tolist()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            clean_key = clean_text_blank_lines(key)
+            if not clean_key or clean_key == 'unknown':
+                continue
+            sub = []
+            _flatten_value(value, sub, depth + 1)
+            if sub:
+                out.append(f"{clean_key}: {' and '.join(sub)}")
+        return
+    if isinstance(node, list):
+        for elem in node:
+            _flatten_value(elem, out, depth + 1)
+        return
+    _append_scalar(node, out)
+
+
 def flatten_nested_structure(x):
     flat_list = []
-    stack = [(x,)]
-    while stack:
-        node, = stack.pop()
-        if node is None or pd.isna(node):
-            continue
-        if isinstance(node, np.ndarray):
-            node = node.tolist()
-        if isinstance(node, list):
-            for elem in reversed(node):
-                stack.append((elem,))
-        elif isinstance(node, dict):
-            for key, value in reversed(list(node.items())):
-                clean_key = clean_text_blank_lines(key)
-                if not clean_key or clean_key == 'unknown':
-                    continue
-                stack.append(({"__kv": (clean_key, value)},))
-        elif isinstance(node, dict) and "__kv" in node:
-            k, v = node["__kv"]
-            sub_flat = []
-            sub_stack = [(v,)]
-            while sub_stack:
-                sub_node, = sub_stack.pop()
-                if sub_node is None or pd.isna(sub_node):
-                    continue
-                if isinstance(sub_node, np.ndarray):
-                    sub_node = sub_node.tolist()
-                if isinstance(sub_node, list):
-                    for e in reversed(sub_node):
-                        sub_stack.append((e,))
-                elif isinstance(sub_node, bool):
-                    sub_flat.append(str(sub_node))
-                elif isinstance(sub_node, str):
-                    s = clean_text_blank_lines(sub_node)
-                    if s and s != 'unknown':
-                        sub_flat.append(s)
-                elif not pd.isna(sub_node):
-                    s = clean_text_blank_lines(str(sub_node))
-                    if s and s != 'unknown':
-                        sub_flat.append(s)
-            if sub_flat:
-                flat_list.append(f"{k}: {' and '.join(sub_flat)}")
-        elif isinstance(node, bool):
-            flat_list.append(str(node))
-        elif isinstance(node, str):
-            clean_str = clean_text_blank_lines(node)
-            if clean_str and clean_str != 'unknown':
-                flat_list.append(clean_str)
-        elif not pd.isna(node):
-            clean_str = clean_text_blank_lines(str(node))
-            if clean_str and clean_str != 'unknown':
-                flat_list.append(clean_str)
+    _flatten_value(x, flat_list)
     return flat_list
 
 def process_nested_field(x):
@@ -214,7 +216,7 @@ def process_related_fields(data, asin_encoder):
                 processed.append(processed_str if processed_str else unknown_product)
         data[field] = processed
         if field in ['also_buy', 'also_view']:
-            tqdm.write(f"   - {field} finished: {len(data)} records, keep top‑5 items")
+            tqdm.write(f"   - {field} finished: {len(data)} records, keep top-5 items")
         else:
             tqdm.write(f"   - {field} finished: {len(data)} records")
         if len(data) > 0:
@@ -229,14 +231,14 @@ def process_timestamps(data):
     tqdm.write("\nProcessing timestamps...")
     if 'unixReviewTime' in data.columns:
         data['_raw_unixReviewTime'] = pd.to_numeric(data['unixReviewTime'], errors='coerce')
-        data['unixReviewTime'] = pd.to_datetime(data['unixReviewTime'], unit='s', errors='coerce').dt.strftime('%Y‑%m‑%d %H:%M:%S').fillna('unknown')
+        data['unixReviewTime'] = pd.to_datetime(data['unixReviewTime'], unit='s', errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S').fillna('unknown')
         invalid_count = (data['unixReviewTime'] == 'unknown').sum()
         if invalid_count > 0:
             tqdm.write(f"   - {invalid_count} invalid unixReviewTime")
     if 'reviewTime' in data.columns:
-        data['reviewTime'] = pd.to_datetime(data['reviewTime'], errors='coerce').dt.strftime('%Y‑%m‑%d').fillna('unknown')
+        data['reviewTime'] = pd.to_datetime(data['reviewTime'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('unknown')
     if 'date' in data.columns:
-        data['date'] = pd.to_datetime(data['date'], errors='coerce').dt.strftime('%Y‑%m‑%d').fillna('unknown')
+        data['date'] = pd.to_datetime(data['date'], errors='coerce').dt.strftime('%Y-%m-%d').fillna('unknown')
     return data
 
 def is_valid_boolean_value(x):
@@ -356,7 +358,7 @@ def get_user_history_feature(data, time_window):
         data['user_hist_id'] = 'unknown'
         data['user_hist_title'] = 'unknown'
         return data
-    tqdm.write("   - Build asin‑title mapping...")
+    tqdm.write("   - Build asin-title mapping...")
     id_title_map = {}
     title_groups = data.groupby('asin')['title'].apply(lambda x: next((t for t in x if t not in ['unknown', '']), 'unknown'))
     for asin_encoded, title in title_groups.items():
@@ -502,7 +504,7 @@ def process_single_scenario(
         if not os.path.exists(review_path):
             raise FileNotFoundError(f"Review file not found: {review_path}")
         review_records = []
-        with open(review_path, 'r', encoding='utf‑8') as f:
+        with open(review_path, 'r', encoding='utf-8') as f:
             for idx, line in enumerate(tqdm(f, desc="Load review json")):
                 if sample_size and idx >= sample_size:
                     break
@@ -526,7 +528,7 @@ def process_single_scenario(
         if not os.path.exists(meta_path):
             raise FileNotFoundError(f"Meta file not found: {meta_path}")
         meta_records = []
-        with open(meta_path, 'r', encoding='utf‑8') as f:
+        with open(meta_path, 'r', encoding='utf-8') as f:
             for idx, line in enumerate(tqdm(f, desc="Load meta json")):
                 if sample_size and idx >= sample_size:
                     break
@@ -589,7 +591,7 @@ def process_single_scenario(
     except Exception as e:
         print(f"   Timestamp error: {str(e)}")
         return review_data, meta_data
-    print(f"7. User‑item encoding")
+    print(f"7. User-item encoding")
     try:
         if user_encoder is None:
             user_encoder = joblib.load(os.path.join(encoder_dir, "global_user_encoder.pkl"))
@@ -616,11 +618,11 @@ def process_single_scenario(
     except Exception as e:
         print(f"   Encoding error: {str(e)}")
         return review_data, meta_data
-    print(f"\n8. Process related‑item fields")
+    print(f"\n8. Process related-item fields")
     try:
         join_data = process_related_fields(join_data, asin_encoder)
     except Exception as e:
-        print(f"   Related‑item fields error: {str(e)}")
+        print(f"   Related-item fields error: {str(e)}")
         try:
             unknown_idx = list(asin_encoder.classes_).index('unknown_asin')
             for field in ['also_buy', 'also_view', 'similar_item']:
@@ -669,7 +671,7 @@ def process_single_scenario(
         if not os.path.exists(save_dir):
             os.makedirs(save_dir, exist_ok=True)
             print(f"   Create output dir: {save_dir}")
-        join_data.to_csv(save_path, index=False, encoding='utf‑8‑sig')
+        join_data.to_csv(save_path, index=False, encoding='utf-8-sig')
         if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
             print(f"   Saved successfully! Path: {save_path}")
             print(f"   File size: {os.path.getsize(save_path)/1024:.2f} KB")
@@ -695,7 +697,7 @@ def process_all_scenarios(
         skip_existing=True
 ):
     print("=" * 80)
-    print("Start processing all amazon multi‑domain datasets")
+    print("Start processing all amazon multi-domain datasets")
     if sample_size:
         print(f"Sample mode: load first {sample_size} records per domain")
     print("=" * 80)
@@ -709,7 +711,7 @@ def process_all_scenarios(
             print(f"\nLoad {SCENARIO_MAPPING[scenario_id]} (ID:{scenario_id}) ...")
             try:
                 review_records = []
-                with open(config["review_path"], 'r', encoding='utf‑8') as f:
+                with open(config["review_path"], 'r', encoding='utf-8') as f:
                     for idx, line in enumerate(tqdm(f, desc="Load review for encoder")):
                         if sample_size and idx >= sample_size:
                             break
@@ -726,7 +728,7 @@ def process_all_scenarios(
                 print(f"   Failed load review: {str(e)}")
             try:
                 meta_records = []
-                with open(config["meta_path"], 'r', encoding='utf‑8') as f:
+                with open(config["meta_path"], 'r', encoding='utf-8') as f:
                     for idx, line in enumerate(tqdm(f, desc="Load meta for encoder")):
                         if sample_size and idx >= sample_size:
                             break

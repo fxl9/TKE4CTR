@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-CTR model training pipeline for KG‑text fusion recommendation task
+CTR model training pipeline for KG-text fusion recommendation task
 """
 import os
 import sys
@@ -16,8 +16,9 @@ import csv
 from datetime import datetime
 import argparse
 
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, ROOT_DIR)
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from configs.config import ModelConfig, EmbeddingConfig, SwitchConfig, TrainConfig, GPUConfig, DatasetConfig, output_cfg
 from src.utils.data_loader import load_ctr_data
@@ -52,9 +53,9 @@ class CTRTrainer:
         self.epochs = getattr(TrainConfig, 'epochs', 20)
         self.batch_size = getattr(TrainConfig, 'batch_size', 256)
         self.eval_batch_size = getattr(TrainConfig, 'eval_batch_size', 512)
-        self.learning_rate = getattr(TrainConfig, 'learning_rate', 1e-5)
+        self.learning_rate = getattr(TrainConfig, 'lr', getattr(TrainConfig, 'learning_rate', 1e-5))
         self.weight_decay = getattr(TrainConfig, 'weight_decay', 1e-4)
-        self.patience = getattr(TrainConfig, 'patience', 3)
+        self.patience = getattr(TrainConfig, 'early_stopping_patience', getattr(TrainConfig, 'patience', 25))
         self.seed = getattr(TrainConfig, 'seed', 42)
         self.loss_fn_name = getattr(TrainConfig, 'loss_fn', 'bce_with_logits')
 
@@ -84,7 +85,7 @@ class CTRTrainer:
 
     def _setup_device(self):
         if not isinstance(self.gpu_id, int) or self.gpu_id < 0 or self.gpu_id > 3:
-            raise ValueError(f"GPU ID must be integer between 0‑3, input: {self.gpu_id}")
+            raise ValueError(f"GPU ID must be integer between 0-3, input: {self.gpu_id}")
 
         os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
         if torch.cuda.is_available():
@@ -154,12 +155,7 @@ class CTRTrainer:
 
         train_labels = np.array(train_labels)
         self.pos_ratio = np.sum(train_labels == 1) / len(train_labels)
-        if self.pos_ratio > 0.9 or self.pos_ratio < 0.1:
-            self.classification_threshold = 0.2
-            self._log(f"Skewed label distribution (positive ratio: {self.pos_ratio:.4f}), threshold: {self.classification_threshold}")
-        else:
-            self.classification_threshold = 0.5
-            self._log(f"Normal label distribution, threshold: {self.classification_threshold}")
+        self._log(f"Train positive ratio: {self.pos_ratio:.4f}")
 
     def _set_seed(self):
         torch.manual_seed(self.seed)
@@ -204,7 +200,7 @@ class CTRTrainer:
         ).to(self.device)
 
         try:
-            fusion_type = "none(non‑fusion mode)"
+            fusion_type = "none(non-fusion mode)"
             if self.train_mode == "kg_text_fusion":
                 if hasattr(model, 'predictor'):
                     ctr_predictor = model.predictor
@@ -245,10 +241,11 @@ class CTRTrainer:
     def _get_loss_fn(self):
         self._log(f"Init loss function: {self.loss_fn_name}")
         if self.loss_fn_name == "bce_with_logits":
-            if len(self.class_weights) > 1 and self.pos_ratio < 0.2:
-                pos_weight = self.class_weights[1] / self.class_weights[0]
+            skewed = self.pos_ratio < 0.2 or self.pos_ratio > 0.8
+            if len(self.class_weights) > 1 and skewed:
+                pos_weight = (self.class_weights[1] / self.class_weights[0]).reshape(1)
                 loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight).to(self.device)
-                self._log(f"Use weighted BCE | pos_weight: {pos_weight:.2f}")
+                self._log(f"Use weighted BCE | pos_weight: {pos_weight.item():.2f}")
             else:
                 loss_fn = nn.BCEWithLogitsLoss().to(self.device)
         elif self.loss_fn_name == "focal":
@@ -401,6 +398,7 @@ class CTRTrainer:
         all_labels = []
         self.optimizer.zero_grad()
         clear_cache_interval = 100
+        pending_accum = False
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{self.epochs} Train [GPU{self.gpu_id}]")
         for step, batch in enumerate(pbar):
@@ -423,23 +421,31 @@ class CTRTrainer:
                 logits = logits.reshape(labels.shape)
 
             loss = self.loss_fn(logits, labels)
+            raw_loss = loss.detach()
             loss = loss / self.grad_accum_steps
             loss.backward()
+            pending_accum = True
 
             if (step + 1) % self.grad_accum_steps == 0:
                 nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip_norm)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
+                pending_accum = False
 
-            total_loss += loss.item() * labels.shape[0]
+            total_loss += raw_loss.item() * labels.shape[0]
             max_samples = 50000
             if len(all_logits) < max_samples:
                 all_logits.append(logits.detach())
                 all_labels.append(labels.detach())
 
             pbar.set_postfix(
-                {"loss": f"{loss.item() * self.grad_accum_steps:.4f}",
+                {"loss": f"{raw_loss.item():.4f}",
                  "lr": f"{self.optimizer.param_groups[0]['lr']:.6f}"})
+
+        if pending_accum:
+            nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip_norm)
+            self.optimizer.step()
+            self.optimizer.zero_grad()
 
         avg_loss = total_loss / len(self.train_loader.dataset)
         metrics = {"auc": 0.0}
@@ -527,7 +533,6 @@ class CTRTrainer:
             "learning_rate": self.learning_rate,
             "batch_size": self.batch_size,
             "pos_ratio": round(self.pos_ratio, 4),
-            "classification_threshold": self.classification_threshold,
             "optimizer": getattr(TrainConfig, 'optimizer', 'adamw'),
             "lr_scheduler": getattr(TrainConfig, 'lr_scheduler', 'cosine'),
             "loss_function": self.loss_fn_name,
@@ -559,7 +564,7 @@ class CTRTrainer:
             f"Config: train_mode={self.train_mode} | LLM={self.display_text_emb} | fusion={self.fusion_method} | num_heads={self.num_heads} | predictor={self.predictor_type}")
         self._log(f"GPU: {self.gpu_id} | device: {self.device} | train samples: {len(self.train_loader.dataset)}")
         self._log(
-            f"Hyper‑params: Epochs={self.epochs} | BatchSize={self.batch_size} | LR={self.learning_rate} | weight_decay={self.weight_decay}")
+            f"Hyper-params: Epochs={self.epochs} | BatchSize={self.batch_size} | LR={self.learning_rate} | weight_decay={self.weight_decay}")
         self._log("=" * 80 + "\n")
 
         start_time = time.time()
@@ -589,7 +594,6 @@ class CTRTrainer:
                             'num_heads': self.num_heads,
                             'predictor_type': self.predictor_type,
                             'pos_ratio': self.pos_ratio,
-                            'threshold': self.classification_threshold,
                             'hyper_params': {
                                 'lr': self.learning_rate,
                                 'batch_size': self.batch_size,
@@ -604,9 +608,9 @@ class CTRTrainer:
                         self._log(f"Model save failed: {e}")
                 else:
                     self._log(
-                        f"No improvement on validation {self.early_stopping_metric} | current: {current_metric:.4f} | best: {self.best_metric:.4f} | early‑stop count: {self.early_stop_count}/{self.patience}")
+                        f"No improvement on validation {self.early_stopping_metric} | current: {current_metric:.4f} | best: {self.best_metric:.4f} | early-stop count: {self.early_stop_count}/{self.patience}")
                     if self.early_stop_count >= self.patience:
-                        self._log(f"Early‑stop triggered, no improvement for {self.patience} consecutive epochs")
+                        self._log(f"Early-stop triggered, no improvement for {self.patience} consecutive epochs")
                         break
 
         except KeyboardInterrupt:
@@ -675,18 +679,18 @@ class CTRTrainer:
 
 def main_sig():
     parser = argparse.ArgumentParser(description="CTR prediction model training main entry")
-    parser.add_argument("--gpu_id", type=int, default=3, help="GPU ID (0‑3)")
+    parser.add_argument("--gpu_id", type=int, default=3, help="GPU ID (0-3)")
     parser.add_argument("--domain", type=str, default="All_Beauty", help="target dataset domain")
-    parser.add_argument("--text_emb_version", type=str, default="Qwen3‑4b", help="text embedding version")
+    parser.add_argument("--text_emb_version", type=str, default="Qwen3-4b", help="text embedding version")
     parser.add_argument("--fusion_method", type=str, default="cross_attention_gated", help="fusion method")
     parser.add_argument("--predictor_type", type=str, default="mlp_final", help="predictor head type")
-    parser.add_argument("--num_heads", type=int, default=4, help="attention heads for cross_attention_gated, suggest power‑of‑two:2,4,8,16")
+    parser.add_argument("--num_heads", type=int, default=4, help="attention heads for cross_attention_gated, suggest power-of-two:2,4,8,16")
     parser.add_argument("--epochs", type=int, default=50, help="max training epochs")
     parser.add_argument("--batch_size", type=int, default=256, help="train batch size")
     parser.add_argument("--eval_batch_size", type=int, default=512, help="valid/test batch size")
     parser.add_argument("--lr", type=float, default=1e-5, help="learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="weight decay for regularization")
-    parser.add_argument("--patience", type=int, default=25, help="early‑stop patience")
+    parser.add_argument("--patience", type=int, default=25, help="early-stop patience")
     parser.add_argument("--optimizer", type=str, default="adamw", help="optimizer type")
     parser.add_argument("--lr_scheduler", type=str, default="cosine", help="lr scheduler type")
     parser.add_argument("--loss_fn", type=str, default="bce_with_logits", help="loss function")
@@ -700,7 +704,7 @@ def main_sig():
     if args.num_heads <= 0 or not isinstance(args.num_heads, int):
         raise ValueError(f"num_heads must be positive integer, input: {args.num_heads}")
     if (args.num_heads & (args.num_heads - 1)) != 0 and args.fusion_method == "cross_attention_gated":
-        print(f"Warning: num_heads recommend power‑of‑two(2,4,8,16), current {args.num_heads}, may reduce attention efficiency")
+        print(f"Warning: num_heads recommend power-of-two(2,4,8,16), current {args.num_heads}, may reduce attention efficiency")
 
     supported_predictors = ModelConfig.AVAILABLE_PREDICTORS
     if args.predictor_type not in supported_predictors:
@@ -726,8 +730,10 @@ def main_sig():
     TrainConfig.epochs = args.epochs
     TrainConfig.batch_size = args.batch_size
     TrainConfig.eval_batch_size = args.eval_batch_size
+    TrainConfig.lr = args.lr
     TrainConfig.learning_rate = args.lr
     TrainConfig.weight_decay = args.weight_decay
+    TrainConfig.early_stopping_patience = args.patience
     TrainConfig.patience = args.patience
     TrainConfig.optimizer = args.optimizer
     TrainConfig.lr_scheduler = args.lr_scheduler
